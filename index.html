@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Audio API ループ切り替え</title>
+    <style>
+        /* (CSSは前回のものと同じでOK) */
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 80vh;
+            background-color: #f4f4f4;
+        }
+        button {
+            font-size: 1.2rem;
+            padding: 12px 24px;
+            margin: 8px;
+            cursor: pointer;
+            border: none;
+            border-radius: 8px;
+            background-color: #007bff;
+            color: white;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button.active {
+            background-color: #28a745;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>状態切り替え (Web Audio APi)</h1>
+    <p>（最初のクリックで全オーディオのデコードとループ再生が開始されます）</p>
+
+    <div>
+        <button id="btnStatic">静止 (1.mp3)</button>
+        <button id="btnWalk">歩行 (2.mp3)</button>
+        <button id="btnRun">早歩き (3.mp3)</button>
+    </div>
+
+    <script src="script.js"></script>
+
+</body>
+</html>
