@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Walking BPM Kick (iOS Fixed)</title>
+    <title>Walking BPM</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #222; color: #fff; }
@@ -14,14 +14,12 @@
 </head>
 <body>
 
-    <button id="playBtn">START WALKING</button>
+    <button id="playBtn">START</button>
     
     <div class="status">BPM: <span id="bpmDisplay">--</span></div>
     <div class="status" style="font-size: 1rem; color:#888;">Intensity: <span id="sdDisplay">--</span></div>
     
     <div class="info">
-        ※iPhoneの方は「動作と方向」への<br>アクセスを許可してください<br>
-        ※必ず https:// でアクセスしてください
     </div>
 
 <script>
@@ -29,8 +27,8 @@ class WalkingKickSystem {
     constructor() {
         // 設定
         this.smoothingFactor = 0.05; 
-        this.minBPM = 80;
-        this.maxBPM = 160;
+        this.minBPM = 110;
+        this.maxBPM = 125;
         
         // データ管理
         this.buffer = [];
