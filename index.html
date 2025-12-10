@@ -3,88 +3,50 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Walking BPM Kick</title>
+    <title>Walking BPM Kick (iOS Fixed)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
     <style>
         body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #222; color: #fff; }
-        #startBtn { padding: 20px 40px; font-size: 1.2rem; border-radius: 50px; border: none; background: #00d2ff; color: #000; cursor: pointer; }
+        #playBtn { padding: 20px 40px; font-size: 1.2rem; border-radius: 50px; border: none; background: #00d2ff; color: #000; cursor: pointer; }
         .status { margin-top: 20px; font-size: 1.5rem; font-variant-numeric: tabular-nums; }
-        .info { font-size: 0.8rem; color: #aaa; margin-top: 10px; }
+        .info { font-size: 0.8rem; color: #aaa; margin-top: 10px; text-align: center; line-height: 1.4; }
     </style>
 </head>
 <body>
 
-    <button id="startBtn">START WALKING</button>
+    <button id="playBtn">START WALKING</button>
+    
     <div class="status">BPM: <span id="bpmDisplay">--</span></div>
-    <div class="status" style="font-size: 1rem; color:#888;">Intensity (SD): <span id="sdDisplay">--</span></div>
-    <div class="info">※スマホを持って歩いてください</div>
+    <div class="status" style="font-size: 1rem; color:#888;">Intensity: <span id="sdDisplay">--</span></div>
+    
+    <div class="info">
+        ※iPhoneの方は「動作と方向」への<br>アクセスを許可してください<br>
+        ※必ず https:// でアクセスしてください
+    </div>
 
 <script>
 class WalkingKickSystem {
     constructor() {
-        // --- 設定 ---
-        this.smoothingFactor = 0.05; // 数値が小さいほど変化がヌルっとなる（0.01〜0.1推奨）
+        // 設定
+        this.smoothingFactor = 0.05; 
         this.minBPM = 80;
         this.maxBPM = 160;
-        this.bufferDuration = 2.0; // 2秒分のデータを見る
         
-        // --- 状態変数 ---
+        // データ管理
         this.buffer = [];
-        this.currentBPM = 100; // 現在の実際のBPM
-        this.targetBPM = 100;  // センサから計算された目標BPM
+        this.currentBPM = 100;
+        this.targetBPM = 100;
         this.isRunning = false;
 
-        // --- Tone.js セットアップ ---
-        // キック音の作成（パラメータで音作りが可能）
-        this.kick = new Tone.MembraneSynth({
-            pitchDecay: 0.05,
-            octaves: 10,
-            oscillator: { type: "sine" },
-            envelope: {
-                attack: 0.001,
-                decay: 0.4,
-                sustain: 0.01,
-                release: 1.4,
-                attackCurve: "exponential"
-            }
-        }).toDestination();
-
-        // ループ再生の設定（4分音符間隔）
+        // Tone.js 初期化（音源作成）
+        this.kick = new Tone.MembraneSynth().toDestination();
         this.loop = new Tone.Loop((time) => {
-            // C1の音程で鳴らす
             this.kick.triggerAttackRelease("C1", "8n", time);
         }, "4n");
     }
 
-    async start() {
-        // 1. AudioContextの開始
-        await Tone.start();
-        
-        // 2. センサ許可のリクエスト (iOS 13+対応)
-        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-            const permission = await DeviceMotionEvent.requestPermission();
-            if (permission !== 'granted') {
-                alert('センサの使用が許可されませんでした');
-                return;
-            }
-        }
-
-        // 3. イベントリスナ登録
-        window.addEventListener('devicemotion', (e) => this.handleMotion(e));
-
-        // 4. 音響エンジンの開始
-        Tone.Transport.bpm.value = this.currentBPM;
-        Tone.Transport.start();
-        this.loop.start(0);
-        
-        this.isRunning = true;
-        this.animate(); // 計算ループ開始
-        
-        document.getElementById('startBtn').innerText = "RUNNING...";
-    }
-
+    // センサデータの処理
     handleMotion(event) {
-        // 重力除去加速度 (Android/iOS差異吸収のため簡易的に考慮)
         const acc = event.acceleration || event.accelerationIncludingGravity;
         if (!acc) return;
 
@@ -97,44 +59,34 @@ class WalkingKickSystem {
 
         // バッファリング
         this.buffer.push(magnitude);
-        // 想定60fps * 2秒 = 120サンプル程度に制限
-        if (this.buffer.length > 120) {
-            this.buffer.shift();
-        }
+        if (this.buffer.length > 120) this.buffer.shift();
     }
 
-    calculateSD(data) {
-        if (data.length < 2) return 0;
-        const mean = data.reduce((a, b) => a + b) / data.length;
-        const variance = data.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / data.length;
-        return Math.sqrt(variance);
-    }
-
+    // メインループ
     animate() {
         if (!this.isRunning) return;
 
-        // 1. 標準偏差(SD)から「激しさ」を算出
-        const sd = this.calculateSD(this.buffer);
+        // SD計算
+        let sd = 0;
+        if (this.buffer.length > 2) {
+            const mean = this.buffer.reduce((a, b) => a + b) / this.buffer.length;
+            const variance = this.buffer.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / this.buffer.length;
+            sd = Math.sqrt(variance);
+        }
         
-        // 2. 目標BPMの決定（しきい値調整）
-        // SDが 0.5〜5.0 の間を minBPM〜maxBPM にマッピング
+        // BPMマッピング
         const minSD = 0.5;
         const maxSD = 5.0;
-        
         let normalized = (sd - minSD) / (maxSD - minSD);
-        normalized = Math.max(0, Math.min(1, normalized)); // 0〜1に制限
+        normalized = Math.max(0, Math.min(1, normalized));
 
-        // ここで目標BPMが決まる
         this.targetBPM = this.minBPM + (normalized * (this.maxBPM - this.minBPM));
 
-        // 3. 平滑化処理 (Lerp: Linear Interpolation)
-        // 現在のBPMを目標BPMに向けて少しずつ動かす
-        // これが「段階的に寄せる」のキモです
+        // 平滑化
         const diff = this.targetBPM - this.currentBPM;
         this.currentBPM += diff * this.smoothingFactor;
 
-        // 4. Tone.jsへの反映
-        // Tone.jsは急激なBPM変更も処理できますが、ここで滑らかになった値を渡す
+        // Tone反映
         Tone.Transport.bpm.value = this.currentBPM;
 
         // 表示更新
@@ -145,10 +97,45 @@ class WalkingKickSystem {
     }
 }
 
-// 開始ボタンの処理
+// インスタンス作成
 const system = new WalkingKickSystem();
-document.getElementById('startBtn').addEventListener('click', () => {
-    system.start();
+
+// --- ユーザーご提示のロジックを統合したイベントリスナ ---
+document.getElementById("playBtn").addEventListener("click", async () => {
+    const btn = document.getElementById("playBtn");
+
+    // 1. iOS 13+ DeviceMotion Permission Request
+    // HTTPS環境でないと、ここでエラーにならずともダイアログが出ない場合があります
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        try {
+            const response = await DeviceMotionEvent.requestPermission();
+            if (response !== 'granted') {
+                alert("センサの許可が必要です。リロードしてやり直してください。");
+                return;
+            }
+        } catch (e) {
+            console.error(e);
+            alert("権限リクエストエラー: " + e);
+            return;
+        }
+    }
+    
+    // 2. イベントリスナの登録
+    // 【重要】クラスのメソッドを呼ぶため、アロー関数で包むか .bind(this) が必要です
+    window.addEventListener("devicemotion", (e) => system.handleMotion(e));
+    
+    // 3. Audio Contextの開始 (Tone.js)
+    await Tone.start();
+    
+    // 4. システム開始
+    Tone.Transport.bpm.value = system.currentBPM;
+    Tone.Transport.start();
+    system.loop.start(0);
+    system.isRunning = true;
+    system.animate();
+    
+    // UI更新
+    btn.style.display = "none";
 });
 
 </script>
