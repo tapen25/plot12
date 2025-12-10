@@ -17,125 +17,131 @@
     <button id="playBtn">START</button>
     
     <div class="status">BPM: <span id="bpmDisplay">--</span></div>
-    <div class="status" style="font-size: 1rem; color:#888;">Intensity: <span id="sdDisplay">--</span></div>
-    
-    <div class="info">
-    </div>
+    <div class="status" style="font-size: 1rem; color:#888;">Steps/min: <span id="spmDisplay">--</span></div>
 
 <script>
 class WalkingKickSystem {
     constructor() {
-        // 設定
-        this.smoothingFactor = 0.05; 
-        this.minBPM = 110;
+
+        // 音楽的な設定
+        this.smoothingFactor = 0.05;  // じわじわ追従
+        this.rateLimit = 3;           // 1フレームあたり最大変化BPM量（音楽的）
+        this.minBPM = 100;
         this.maxBPM = 125;
-        
-        // データ管理
-        this.buffer = [];
-        this.currentBPM = 100;
-        this.targetBPM = 100;
+
+        // ステップ検出
+        this.prevMagnitude = 0;
+        this.prevPrevMagnitude = 0;
+        this.threshold = 1.2;         // 歩行ピーク検出用（必要なら微調整）
+        this.stepTimestamps = [];
+
+        // BPM管理
+        this.currentBPM = 110;
+        this.targetBPM = 110;
         this.isRunning = false;
 
-        // Tone.js 初期化（音源作成）
+        // Kick
         this.kick = new Tone.MembraneSynth().toDestination();
         this.loop = new Tone.Loop((time) => {
             this.kick.triggerAttackRelease("C1", "8n", time);
         }, "4n");
     }
 
-    // センサデータの処理
+    // ---- 加速度 → ステップ検出 ----
     handleMotion(event) {
         const acc = event.acceleration || event.accelerationIncludingGravity;
         if (!acc) return;
 
-        const x = acc.x || 0;
-        const y = acc.y || 0;
-        const z = acc.z || 0;
+        const magnitude = Math.sqrt(acc.x**2 + acc.y**2 + acc.z**2);
+        const now = Date.now();
 
-        // ベクトル合成
-        const magnitude = Math.sqrt(x*x + y*y + z*z);
+        // ピーク検出：上昇→下降＋しきい値
+        if (
+            this.prevMagnitude > this.prevPrevMagnitude &&
+            this.prevMagnitude > magnitude &&
+            this.prevMagnitude > this.threshold
+        ) {
+            this.stepTimestamps.push(now);
+        }
 
-        // バッファリング
-        this.buffer.push(magnitude);
-        if (this.buffer.length > 120) this.buffer.shift();
+        // 古いデータ削除（10秒以上前）
+        this.stepTimestamps = this.stepTimestamps.filter(t => now - t < 10000);
+
+        this.prevPrevMagnitude = this.prevMagnitude;
+        this.prevMagnitude = magnitude;
     }
 
-    // メインループ
+    // ---- 歩行周期 → BPM 計算 ----
+    updateTargetBPM() {
+        const ts = this.stepTimestamps;
+        if (ts.length < 3) return 0;
+
+        const durationMs = ts[ts.length - 1] - ts[0];
+        const steps = ts.length - 1;
+        if (durationMs <= 0) return;
+
+        const spm = steps / (durationMs / 60000);  // steps per minute
+
+        // BPM範囲制限 + 音楽的に補正
+        this.targetBPM = Math.max(this.minBPM, Math.min(this.maxBPM, spm));
+
+        return spm;
+    }
+
+    // ---- メイン更新ループ ----
     animate() {
         if (!this.isRunning) return;
 
-        // SD計算
-        let sd = 0;
-        if (this.buffer.length > 2) {
-            const mean = this.buffer.reduce((a, b) => a + b) / this.buffer.length;
-            const variance = this.buffer.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / this.buffer.length;
-            sd = Math.sqrt(variance);
-        }
-        
-        // BPMマッピング
-        const minSD = 0.5;
-        const maxSD = 5.0;
-        let normalized = (sd - minSD) / (maxSD - minSD);
-        normalized = Math.max(0, Math.min(1, normalized));
+        // ステップから BPM 計算
+        const spm = this.updateTargetBPM();
 
-        this.targetBPM = this.minBPM + (normalized * (this.maxBPM - this.minBPM));
+        // BPM 変化幅制限（音楽的にする）
+        let diff = this.targetBPM - this.currentBPM;
+        diff = Math.min(this.rateLimit, Math.max(-this.rateLimit, diff));
 
-        // 平滑化
-        const diff = this.targetBPM - this.currentBPM;
+        // じわじわ追従
         this.currentBPM += diff * this.smoothingFactor;
 
-        // Tone反映
+        // Tone に反映
         Tone.Transport.bpm.value = this.currentBPM;
 
-        // 表示更新
+        // 表示
         document.getElementById('bpmDisplay').innerText = this.currentBPM.toFixed(1);
-        document.getElementById('sdDisplay').innerText = sd.toFixed(2);
+        if (spm) document.getElementById('spmDisplay').innerText = spm.toFixed(0);
 
         requestAnimationFrame(() => this.animate());
     }
 }
 
-// インスタンス作成
+// ---- インスタンス作成 ----
 const system = new WalkingKickSystem();
 
-// --- ユーザーご提示のロジックを統合したイベントリスナ ---
 document.getElementById("playBtn").addEventListener("click", async () => {
     const btn = document.getElementById("playBtn");
 
-    // 1. iOS 13+ DeviceMotion Permission Request
-    // HTTPS環境でないと、ここでエラーにならずともダイアログが出ない場合があります
+    // iOS用センサ許可
     if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-        try {
-            const response = await DeviceMotionEvent.requestPermission();
-            if (response !== 'granted') {
-                alert("センサの許可が必要です。リロードしてやり直してください。");
-                return;
-            }
-        } catch (e) {
-            console.error(e);
-            alert("権限リクエストエラー: " + e);
+        const response = await DeviceMotionEvent.requestPermission();
+        if (response !== 'granted') {
+            alert("センサの許可が必要です。");
             return;
         }
     }
-    
-    // 2. イベントリスナの登録
-    // 【重要】クラスのメソッドを呼ぶため、アロー関数で包むか .bind(this) が必要です
+
+    // センサ開始
     window.addEventListener("devicemotion", (e) => system.handleMotion(e));
-    
-    // 3. Audio Contextの開始 (Tone.js)
+
+    // Tone.js開始
     await Tone.start();
-    
-    // 4. システム開始
-    Tone.Transport.bpm.value = system.currentBPM;
     Tone.Transport.start();
     system.loop.start(0);
+
     system.isRunning = true;
     system.animate();
-    
-    // UI更新
+
     btn.style.display = "none";
 });
-
 </script>
+
 </body>
 </html>
