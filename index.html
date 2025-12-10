@@ -3,49 +3,154 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web Audio API ループ切り替え</title>
+    <title>Walking BPM Kick</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
     <style>
-        /* (CSSは前回のものと同じでOK) */
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            min-height: 80vh;
-            background-color: #f4f4f4;
-        }
-        button {
-            font-size: 1.2rem;
-            padding: 12px 24px;
-            margin: 8px;
-            cursor: pointer;
-            border: none;
-            border-radius: 8px;
-            background-color: #007bff;
-            color: white;
-            transition: background-color 0.2s;
-        }
-        button:hover {
-            background-color: #0056b3;
-        }
-        button.active {
-            background-color: #28a745;
-        }
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #222; color: #fff; }
+        #startBtn { padding: 20px 40px; font-size: 1.2rem; border-radius: 50px; border: none; background: #00d2ff; color: #000; cursor: pointer; }
+        .status { margin-top: 20px; font-size: 1.5rem; font-variant-numeric: tabular-nums; }
+        .info { font-size: 0.8rem; color: #aaa; margin-top: 10px; }
     </style>
 </head>
 <body>
 
-    <h1>状態切り替え (Web Audio APi)</h1>
-    <p>（最初のクリックで全オーディオのデコードとループ再生が開始されます）</p>
+    <button id="startBtn">START WALKING</button>
+    <div class="status">BPM: <span id="bpmDisplay">--</span></div>
+    <div class="status" style="font-size: 1rem; color:#888;">Intensity (SD): <span id="sdDisplay">--</span></div>
+    <div class="info">※スマホを持って歩いてください</div>
 
-    <div>
-        <button id="btnStatic">静止 (1.mp3)</button>
-        <button id="btnWalk">歩行 (2.mp3)</button>
-        <button id="btnRun">早歩き (3.mp3)</button>
-    </div>
+<script>
+class WalkingKickSystem {
+    constructor() {
+        // --- 設定 ---
+        this.smoothingFactor = 0.05; // 数値が小さいほど変化がヌルっとなる（0.01〜0.1推奨）
+        this.minBPM = 80;
+        this.maxBPM = 160;
+        this.bufferDuration = 2.0; // 2秒分のデータを見る
+        
+        // --- 状態変数 ---
+        this.buffer = [];
+        this.currentBPM = 100; // 現在の実際のBPM
+        this.targetBPM = 100;  // センサから計算された目標BPM
+        this.isRunning = false;
 
-    <script src="script.js"></script>
+        // --- Tone.js セットアップ ---
+        // キック音の作成（パラメータで音作りが可能）
+        this.kick = new Tone.MembraneSynth({
+            pitchDecay: 0.05,
+            octaves: 10,
+            oscillator: { type: "sine" },
+            envelope: {
+                attack: 0.001,
+                decay: 0.4,
+                sustain: 0.01,
+                release: 1.4,
+                attackCurve: "exponential"
+            }
+        }).toDestination();
 
+        // ループ再生の設定（4分音符間隔）
+        this.loop = new Tone.Loop((time) => {
+            // C1の音程で鳴らす
+            this.kick.triggerAttackRelease("C1", "8n", time);
+        }, "4n");
+    }
+
+    async start() {
+        // 1. AudioContextの開始
+        await Tone.start();
+        
+        // 2. センサ許可のリクエスト (iOS 13+対応)
+        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+            const permission = await DeviceMotionEvent.requestPermission();
+            if (permission !== 'granted') {
+                alert('センサの使用が許可されませんでした');
+                return;
+            }
+        }
+
+        // 3. イベントリスナ登録
+        window.addEventListener('devicemotion', (e) => this.handleMotion(e));
+
+        // 4. 音響エンジンの開始
+        Tone.Transport.bpm.value = this.currentBPM;
+        Tone.Transport.start();
+        this.loop.start(0);
+        
+        this.isRunning = true;
+        this.animate(); // 計算ループ開始
+        
+        document.getElementById('startBtn').innerText = "RUNNING...";
+    }
+
+    handleMotion(event) {
+        // 重力除去加速度 (Android/iOS差異吸収のため簡易的に考慮)
+        const acc = event.acceleration || event.accelerationIncludingGravity;
+        if (!acc) return;
+
+        const x = acc.x || 0;
+        const y = acc.y || 0;
+        const z = acc.z || 0;
+
+        // ベクトル合成
+        const magnitude = Math.sqrt(x*x + y*y + z*z);
+
+        // バッファリング
+        this.buffer.push(magnitude);
+        // 想定60fps * 2秒 = 120サンプル程度に制限
+        if (this.buffer.length > 120) {
+            this.buffer.shift();
+        }
+    }
+
+    calculateSD(data) {
+        if (data.length < 2) return 0;
+        const mean = data.reduce((a, b) => a + b) / data.length;
+        const variance = data.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / data.length;
+        return Math.sqrt(variance);
+    }
+
+    animate() {
+        if (!this.isRunning) return;
+
+        // 1. 標準偏差(SD)から「激しさ」を算出
+        const sd = this.calculateSD(this.buffer);
+        
+        // 2. 目標BPMの決定（しきい値調整）
+        // SDが 0.5〜5.0 の間を minBPM〜maxBPM にマッピング
+        const minSD = 0.5;
+        const maxSD = 5.0;
+        
+        let normalized = (sd - minSD) / (maxSD - minSD);
+        normalized = Math.max(0, Math.min(1, normalized)); // 0〜1に制限
+
+        // ここで目標BPMが決まる
+        this.targetBPM = this.minBPM + (normalized * (this.maxBPM - this.minBPM));
+
+        // 3. 平滑化処理 (Lerp: Linear Interpolation)
+        // 現在のBPMを目標BPMに向けて少しずつ動かす
+        // これが「段階的に寄せる」のキモです
+        const diff = this.targetBPM - this.currentBPM;
+        this.currentBPM += diff * this.smoothingFactor;
+
+        // 4. Tone.jsへの反映
+        // Tone.jsは急激なBPM変更も処理できますが、ここで滑らかになった値を渡す
+        Tone.Transport.bpm.value = this.currentBPM;
+
+        // 表示更新
+        document.getElementById('bpmDisplay').innerText = this.currentBPM.toFixed(1);
+        document.getElementById('sdDisplay').innerText = sd.toFixed(2);
+
+        requestAnimationFrame(() => this.animate());
+    }
+}
+
+// 開始ボタンの処理
+const system = new WalkingKickSystem();
+document.getElementById('startBtn').addEventListener('click', () => {
+    system.start();
+});
+
+</script>
 </body>
 </html>
