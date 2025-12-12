@@ -1,3 +1,10 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>BPM追従シーケンサ</title>
+</head>
+<body>
 <button id="start">Start (iOSは要タップ)</button>
 <div id="status">停止中</div>
 <div id="debug">BPM: 0</div>
@@ -5,25 +12,28 @@
 <script>
 let audioCtx;
 let usePatternA = true;
-let isPlaying = false; 
-let currentNoteIndex = 0; 
-let smoothedBPM = 60; // 2秒間の平均から算出したBPM
-
-// 過去の加速度データを保存する配列 {time: タイムスタンプ, val: 加速度}
+let isPlaying = false;
+let smoothedBPM = 60;
 let motionHistory = [];
-const HISTORY_DURATION = 2000; // 2秒間 (ミリ秒)
+const HISTORY_DURATION = 2000; // ms
 
-// ノート（音程）定義
+// パターン / リズム
 const patterns = {
   A: ["D4","C4","B3","D4", "C4","A3", "G3","A3", "B3"],
   B: ["D4","C4","B3","D4", "C4","A3", "G3","B3", "G3"]
 };
-
-// リズム（長さ）定義 (1.0 = 4分音符)
 const durations = [0.25, 0.25, 0.25, 0.25, 0.5, 0.5, 0.5, 0.5, 1.0];
 
+// スケジューリング管理
+let tempoAtStart = 120;       // 現在適用中のテンポ（小節頭で更新）
+let pendingTempo = null;      // 次の小節頭で適用するテンポ（nullで未予約）
+let sequenceStartTime = 0;    // 次パターンの絶対開始時刻 (audioCtx.currentTime 基準)
+let scheduledFinishTimer = null;
+let tempoWatchTimer = null;
+let devMotionAttached = false;
+
 // ---------------------------
-// 音名 → 周波数換算
+// 音名 -> 周波数
 // ---------------------------
 function noteToFreq(note, offset = 0) {
   const map = {
@@ -31,16 +41,15 @@ function noteToFreq(note, offset = 0) {
     C4: -9,  D4: -7,  E4: -5, F4: -4, G4: -2, A4: 0, B4: 2,
     C5: 3
   };
-  
   let semitone = map[note];
   if (semitone === undefined) semitone = 0;
-  
-  // オフセットを加算（BPM120以上で+1される）
   semitone += offset;
-
-  return 440 * Math.pow(2, semitone/12);
+  return 440 * Math.pow(2, semitone / 12);
 }
 
+// ---------------------------
+// スタートボタン
+// ---------------------------
 document.getElementById("start").onclick = async () => {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -48,122 +57,145 @@ document.getElementById("start").onclick = async () => {
   if (audioCtx.state === 'suspended') {
     await audioCtx.resume();
   }
-  
-  if (typeof DeviceMotionEvent.requestPermission === 'function') {
-    await DeviceMotionEvent.requestPermission();
+  if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+    try { await DeviceMotionEvent.requestPermission(); } catch(e) { /* iOS で拒否されたら無視 */ }
+  }
+  if (!devMotionAttached) {
+    window.addEventListener("devicemotion", handleMotion);
+    devMotionAttached = true;
   }
 
-  window.addEventListener("devicemotion", handleMotion);
-  document.getElementById("status").innerText = "センサー待機中...";
+  if (!isPlaying) {
+    startSequence();
+  }
 };
 
 // ---------------------------
-// センサー処理：データを蓄積し、平均BPMを算出
+// センサー処理（2秒平均でBPM算出）
 // ---------------------------
 function handleMotion(e) {
   const acc = e.accelerationIncludingGravity;
   if (!acc) return;
-
-  const mag = Math.sqrt(acc.x**2 + acc.y**2 + acc.z**2);
+  const mag = Math.sqrt((acc.x||0)**2 + (acc.y||0)**2 + (acc.z||0)**2);
   const now = performance.now();
-
-  // 1. 履歴に追加
   motionHistory.push({ time: now, val: mag });
-
-  // 2. 2秒以上前のデータを削除 (フィルタリング)
   motionHistory = motionHistory.filter(item => now - item.time < HISTORY_DURATION);
-
-  // 3. 平均値を計算
   let sum = 0;
   motionHistory.forEach(item => sum += item.val);
-  const avgMag = sum / motionHistory.length || 0;
-
-  // 4. 平均値からBPMを決定 (ここが安定したBPMになります)
+  const avgMag = sum / (motionHistory.length || 1);
   smoothedBPM = mapAccelToBPM(avgMag);
-  
-  // デバッグ表示
   const isHighSpeed = smoothedBPM >= 120;
   document.getElementById("debug").innerText = `Avg BPM: ${Math.floor(smoothedBPM)} ${isHighSpeed ? "🔥HIGH" : ""}`;
 
-  // 5. トリガー判定（開始時だけは瞬発力を見たいので、現在の mag も使う）
-  // 停止中で、かつ「今強く振った」場合にスタート
-  if (!isPlaying && mag > 15) { 
+  // 停止中で強く振ったら開始
+  if (!isPlaying && mag > 15) {
     startSequence();
   }
 }
 
 function mapAccelToBPM(a) {
-  // 110〜150くらいまで変化
-  let bpm = 100 + (a - 10) * 8; 
+  let bpm = 100 + (a - 10) * 8;
   if (bpm < 60) bpm = 60;
   if (bpm > 200) bpm = 200;
   return bpm;
 }
 
 // ---------------------------
-// シーケンス開始処理
+// シーケンス開始（最初の小節をスケジュール）
 // ---------------------------
 function startSequence() {
+  if (!audioCtx) return;
   isPlaying = true;
-  currentNoteIndex = 0;
-  playNextNote(); 
+  usePatternA = true;
+  tempoAtStart = Math.max(60, Math.min(200, Math.round(smoothedBPM)));
+  pendingTempo = null;
+  sequenceStartTime = audioCtx.currentTime + 0.05;
+  schedulePattern(usePatternA, tempoAtStart, sequenceStartTime);
+
+  // テンポ変化を監視して「次の小節頭」で適用するためのタイマー
+  if (tempoWatchTimer) clearInterval(tempoWatchTimer);
+  tempoWatchTimer = setInterval(() => {
+    const bpmRounded = Math.max(60, Math.min(200, Math.round(smoothedBPM)));
+    if (Math.abs(bpmRounded - tempoAtStart) >= 2) {
+      pendingTempo = bpmRounded;
+    }
+  }, 150);
 }
 
 // ---------------------------
-// 再生処理
+// パターンを絶対時間でスケジュール（1パターン分のみ）
 // ---------------------------
-function playNextNote() {
-  const currentPattern = usePatternA ? patterns.A : patterns.B;
-  
-  // パターン終了チェック
-  if (currentNoteIndex >= currentPattern.length) {
-    finishSequence();
-    return;
-  }
+function schedulePattern(isA, tempo, startTime) {
+  if (!audioCtx) return;
+  const pattern = isA ? patterns.A : patterns.B;
+  let accumBeats = 0;
+  const beatDuration = 60 / tempo;
 
-  const now = audioCtx.currentTime;
-  const noteName = currentPattern[currentNoteIndex];
-  const durationVal = durations[currentNoteIndex];
+  pattern.forEach((noteName, idx) => {
+    const durationVal = durations[idx];
+    const noteStart = startTime + accumBeats * beatDuration;
+    const noteLen = beatDuration * durationVal;
 
-  // ★ 2秒間の平均BPM (smoothedBPM) を使用して長さを決める
-  const beatDuration = 60 / smoothedBPM; 
-  const noteTimeLen = beatDuration * durationVal;
+    // 基本オフセット
+    const baseOffset = (tempo >= 120) ? 1 : 0;
 
-  // ★ ベースのピッチオフセット（従来の挙動を維持）
-  const baseOffset = (smoothedBPM >= 120) ? 1 : 0;
+    // ハーモニー選定（テンポ基準で決定）
+    let harmonyIntervals = [0];
+    if (tempo >= 160) {
+      harmonyIntervals = [0, 4, 7];
+    } else if (tempo >= 120) {
+      harmonyIntervals = [0, 4];
+    }
+    const freqs = harmonyIntervals.map(i => noteToFreq(noteName, baseOffset + i));
 
-  // ★ BPMに応じてハーモニー層を決定
-  // 120以上で長3度(+4), 160以上でさらに完全5度(+7)を追加
-  let harmonyIntervals = [0]; // semitone offsets relative to baseOffset
-  if (smoothedBPM >= 160) {
-    harmonyIntervals = [0, 4, 7];
-  } else if (smoothedBPM >= 120) {
-    harmonyIntervals = [0, 4];
-  }
+    // 音を予約
+    playTone(freqs, noteStart, noteLen);
 
-  // 各レイヤーの周波数配列を作る
-  const freqs = harmonyIntervals.map(i => noteToFreq(noteName, baseOffset + i));
+    // UI更新（該当ノートが始まるタイミングで表示）
+    const uiDelay = (noteStart - audioCtx.currentTime) * 1000;
+    setTimeout(() => {
+      document.getElementById("status").innerText =
+        `再生中: ${isA ? "A" : "B"} (${idx+1}/${pattern.length}) ${harmonyIntervals.length>1 ? "＋ハモリ" : ""}`;
+    }, Math.max(0, uiDelay));
 
-  // 複数レイヤーを鳴らす
-  playTone(freqs, now, noteTimeLen);
-  
-  document.getElementById("status").innerText = 
-    `再生中: ${usePatternA?"A":"B"} (${currentNoteIndex+1}/${currentPattern.length}) ${harmonyIntervals.length>1 ? "＋ハモリ" : ""}`;
+    accumBeats += durationVal;
+  });
 
-  // 次の音の予約
-  setTimeout(() => {
-    currentNoteIndex++;
-    playNextNote(); 
-  }, noteTimeLen * 1000); 
+  // 次パターン開始の予約（少し余裕を持たせる）
+  const totalDuration = accumBeats * beatDuration;
+  if (scheduledFinishTimer) clearTimeout(scheduledFinishTimer);
+  const finishDelay = (startTime + totalDuration - audioCtx.currentTime) * 1000 + 20;
+  scheduledFinishTimer = setTimeout(() => {
+    onPatternEnd();
+  }, Math.max(0, finishDelay));
 }
+
 // ---------------------------
-// 単音再生用関数（複数レイヤー対応、柔らかい音設定）
+// パターン終了時（ここでテンポを更新して次の小節をスケジュール）
+// ---------------------------
+function onPatternEnd() {
+  if (!isPlaying) return;
+  // 次の小節頭でテンポを更新（pendingTempoがあればそれを使う）
+  if (pendingTempo) {
+    tempoAtStart = pendingTempo;
+    pendingTempo = null;
+  } else {
+    tempoAtStart = Math.max(60, Math.min(200, Math.round(smoothedBPM)));
+  }
+
+  // パターン切替
+  usePatternA = !usePatternA;
+
+  // 次パターンはすこし先から開始（50ms）
+  sequenceStartTime = audioCtx.currentTime + 0.05;
+  schedulePattern(usePatternA, tempoAtStart, sequenceStartTime);
+}
+
+// ---------------------------
+// サウンド生成（既存の実装を流用）
 // ---------------------------
 function playTone(freqs, time, duration) {
-  // freqs: 周波数の配列（長さ1以上）
-  // レイヤーごとの相対音量
   const layerGains = [0.30, 0.18, 0.12];
-
   const soundEnd = time + (duration * 0.9);
 
   freqs.forEach((freq, idx) => {
@@ -173,8 +205,6 @@ function playTone(freqs, time, duration) {
     osc.type = "triangle";
     osc.frequency.value = freq;
 
-    // ちょっとだけデチューン/位相差を付けることで豊かな重なりにする
-    // 中間レイヤーは微妙にマイナス、上の層はプラスに
     if (osc.detune) {
       const detuneCents = idx === 0 ? 0 : (idx % 2 === 0 ? 6 : -6);
       osc.detune.value = detuneCents;
@@ -192,9 +222,21 @@ function playTone(freqs, time, duration) {
   });
 }
 
+// ---------------------------
+// 停止処理（必要なら外部で呼べる）
+// ---------------------------
 function finishSequence() {
+  if (scheduledFinishTimer) {
+    clearTimeout(scheduledFinishTimer);
+    scheduledFinishTimer = null;
+  }
+  if (tempoWatchTimer) {
+    clearInterval(tempoWatchTimer);
+    tempoWatchTimer = null;
+  }
   isPlaying = false;
-  usePatternA = !usePatternA; 
   document.getElementById("status").innerText = "待機中...";
 }
 </script>
+</body>
+</html>
