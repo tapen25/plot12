@@ -232,34 +232,84 @@ function playFootstep(time, accent = false) {
 // ---------------------------
 // サウンド生成：同じフレーズを違う楽器で鳴らす
 // ---------------------------
+// ...existing code...
 function playTone(freqs, time, duration) {
-  // 今回は freqs[0] を使う（ハーモニーは freqs 配列で処理済みなら別実装へ変更可）
-  const freq = freqs[0];
+  if (!audioCtx) return;
+  // master gain を audioCtx に保持して使い回す
+  if (!audioCtx._masterGain) {
+    const mg = audioCtx.createGain();
+    mg.gain.value = 0.9; // 全体のボリューム調整（必要ならここで下げる）
+    mg.connect(audioCtx.destination);
+    audioCtx._masterGain = mg;
+  }
+  const master = audioCtx._masterGain;
 
-  // 楽器レイヤー
-  const instruments = [
-    { type: "triangle", gain: 0.30 },
-    { type: "square",   gain: 0.15 },
-    { type: "sine",     gain: 0.12 }
-  ];
+  // ヘルパー：短いフェードで安全に止める
+  const stopAt = time + duration + 0.05;
 
-  instruments.forEach(inst => {
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
+  // Lead: sawtooth（存在感のある主音）
+  const leadOsc = audioCtx.createOscillator();
+  const leadGain = audioCtx.createGain();
+  leadOsc.type = "sawtooth";
+  leadOsc.frequency.value = freqs[0];
+  leadGain.gain.setValueAtTime(0.0001, time);
+  leadGain.gain.linearRampToValueAtTime(0.36, time + 0.02);
+  leadGain.gain.exponentialRampToValueAtTime(0.0001, time + duration);
+  const leadFilter = audioCtx.createBiquadFilter();
+  leadFilter.type = "lowpass";
+  leadFilter.frequency.value = 6000;
+  leadOsc.connect(leadFilter).connect(leadGain).connect(master);
+  leadOsc.start(time);
+  leadOsc.stop(stopAt);
 
-    osc.type = inst.type;
-    osc.frequency.value = freq;
+  // Bell: 高域を補う sine（聴きやすさ向上）
+  const bellOsc = audioCtx.createOscillator();
+  const bellGain = audioCtx.createGain();
+  bellOsc.type = "sine";
+  bellOsc.frequency.value = freqs[0] * 2.0; // オクターブ上で明瞭に
+  bellGain.gain.setValueAtTime(0.0001, time);
+  bellGain.gain.linearRampToValueAtTime(0.18, time + 0.02);
+  bellGain.gain.exponentialRampToValueAtTime(0.0001, time + duration);
+  const bellHP = audioCtx.createBiquadFilter();
+  bellHP.type = "highpass";
+  bellHP.frequency.value = 700;
+  bellOsc.connect(bellHP).connect(bellGain).connect(master);
+  bellOsc.start(time);
+  bellOsc.stop(stopAt);
 
-    // アタック & リリース
-    gain.gain.setValueAtTime(0, time);
-    gain.gain.linearRampToValueAtTime(inst.gain, time + 0.03);
-    gain.gain.exponentialRampToValueAtTime(0.001, time + duration * 0.9);
+  // Body: 少しデチューンした triangle（温かみと厚み）
+  const bodyOsc = audioCtx.createOscillator();
+  const bodyGain = audioCtx.createGain();
+  bodyOsc.type = "triangle";
+  bodyOsc.frequency.value = freqs[0];
+  bodyOsc.detune.value = -12; // 半音下で少し厚みを出す
+  bodyGain.gain.setValueAtTime(0.0001, time);
+  bodyGain.gain.linearRampToValueAtTime(0.12, time + 0.02);
+  bodyGain.gain.exponentialRampToValueAtTime(0.0001, time + duration);
+  bodyOsc.connect(bodyGain).connect(master);
+  bodyOsc.start(time);
+  bodyOsc.stop(stopAt);
 
-    osc.connect(gain).connect(audioCtx.destination);
-    osc.start(time);
-    osc.stop(time + duration);
-  });
+  // ハーモニーがあれば低めのサブで補強（小さめの音量）
+  for (let i = 1; i < freqs.length; i++) {
+    const f = freqs[i];
+    const hOsc = audioCtx.createOscillator();
+    const hGain = audioCtx.createGain();
+    hOsc.type = "sine";
+    hOsc.frequency.value = f;
+    hGain.gain.setValueAtTime(0.0001, time);
+    hGain.gain.linearRampToValueAtTime(0.08, time + 0.02);
+    hGain.gain.exponentialRampToValueAtTime(0.0001, time + duration);
+    // 軽くローパスで丸める
+    const hLP = audioCtx.createBiquadFilter();
+    hLP.type = "lowpass";
+    hLP.frequency.value = 2500;
+    hOsc.connect(hLP).connect(hGain).connect(master);
+    hOsc.start(time);
+    hOsc.stop(stopAt);
+  }
 }
+// ...existing code...
 
 
 // ---------------------------
