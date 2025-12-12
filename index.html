@@ -5,14 +5,18 @@
 <script>
 let audioCtx;
 let usePatternA = true;
-let isPlaying = false; // 再生中フラグ
-let currentNoteIndex = 0; // 現在何番目の音を鳴らしているか
-let currentBPM = 60; // リアルタイムBPM保持用
+let isPlaying = false; 
+let currentNoteIndex = 0; 
+let smoothedBPM = 60; // 2秒間の平均から算出したBPM
+
+// 過去の加速度データを保存する配列 {time: タイムスタンプ, val: 加速度}
+let motionHistory = [];
+const HISTORY_DURATION = 2000; // 2秒間 (ミリ秒)
 
 // ノート（音程）定義
 const patterns = {
-  A: ["D4","C#4","B3","D4", "C4","A3", "G3","A3", "B3"],
-  B: ["D4","C#4","B3","D4", "C4","A3", "G3","B3", "G3"]
+  A: ["D4","C4","B3","D4", "C4","A3", "G3","A3", "B3"],
+  B: ["D4","C4","B3","D4", "C4","A3", "G3","B3", "G3"]
 };
 
 // リズム（長さ）定義 (1.0 = 4分音符)
@@ -20,7 +24,6 @@ const durations = [0.25, 0.25, 0.25, 0.25, 0.5, 0.5, 0.5, 0.5, 1.0];
 
 // ---------------------------
 // 音名 → 周波数換算
-// offset引数を追加：+1で半音上がり、0で通常
 // ---------------------------
 function noteToFreq(note, offset = 0) {
   const map = {
@@ -55,33 +58,45 @@ document.getElementById("start").onclick = async () => {
 };
 
 // ---------------------------
-// センサー処理：常にBPMを更新し続ける
+// センサー処理：データを蓄積し、平均BPMを算出
 // ---------------------------
 function handleMotion(e) {
   const acc = e.accelerationIncludingGravity;
   if (!acc) return;
 
   const mag = Math.sqrt(acc.x**2 + acc.y**2 + acc.z**2);
+  const now = performance.now();
 
-  // 1. 常に最新のBPMを計算して更新（演奏中でも可変にするため）
-  currentBPM = mapAccelToBPM(mag);
+  // 1. 履歴に追加
+  motionHistory.push({ time: now, val: mag });
+
+  // 2. 2秒以上前のデータを削除 (フィルタリング)
+  motionHistory = motionHistory.filter(item => now - item.time < HISTORY_DURATION);
+
+  // 3. 平均値を計算
+  let sum = 0;
+  motionHistory.forEach(item => sum += item.val);
+  const avgMag = sum / motionHistory.length || 0;
+
+  // 4. 平均値からBPMを決定 (ここが安定したBPMになります)
+  smoothedBPM = mapAccelToBPM(avgMag);
   
   // デバッグ表示
-  const isHighSpeed = currentBPM >= 120;
-  document.getElementById("debug").innerText = `BPM: ${Math.floor(currentBPM)} ${isHighSpeed ? "🔥HIGH(半音UP)" : ""}`;
+  const isHighSpeed = smoothedBPM >= 120;
+  document.getElementById("debug").innerText = `Avg BPM: ${Math.floor(smoothedBPM)} ${isHighSpeed ? "🔥HIGH" : ""}`;
 
-  // 2. 停止中で、かつ強い揺れ(トリガー)があったら再生開始
-  if (!isPlaying && mag > 15) { // 誤爆防止で閾値を少し上げました
+  // 5. トリガー判定（開始時だけは瞬発力を見たいので、現在の mag も使う）
+  // 停止中で、かつ「今強く振った」場合にスタート
+  if (!isPlaying && mag > 15) { 
     startSequence();
   }
 }
 
 function mapAccelToBPM(a) {
-  // 110〜150くらいまでダイナミックに変化させる
-  // 最小100ないと遅すぎて演奏感が薄れるため調整
+  // 110〜150くらいまで変化
   let bpm = 100 + (a - 10) * 8; 
-  if (bpm < 60) bpm = 60;   // 下限
-  if (bpm > 200) bpm = 200; // 上限
+  if (bpm < 60) bpm = 60;
+  if (bpm > 200) bpm = 200;
   return bpm;
 }
 
@@ -91,15 +106,16 @@ function mapAccelToBPM(a) {
 function startSequence() {
   isPlaying = true;
   currentNoteIndex = 0;
-  playNextNote(); // 最初の1音目を鳴らす
+  playNextNote(); 
 }
 
 // ---------------------------
-// 1音ずつスケジュールする再帰関数
+// 再生処理
 // ---------------------------
 function playNextNote() {
-  // パターン終了チェック
   const currentPattern = usePatternA ? patterns.A : patterns.B;
+  
+  // パターン終了チェック
   if (currentNoteIndex >= currentPattern.length) {
     finishSequence();
     return;
@@ -107,47 +123,47 @@ function playNextNote() {
 
   const now = audioCtx.currentTime;
   const noteName = currentPattern[currentNoteIndex];
-  const durationVal = durations[currentNoteIndex]; // 0.25, 0.5, etc.
+  const durationVal = durations[currentNoteIndex];
 
-  // ★ここでリアルタイムBPMを使って長さを決める
-  const beatDuration = 60 / currentBPM; 
+  // ★ 2秒間の平均BPM (smoothedBPM) を使用して長さを決める
+  const beatDuration = 60 / smoothedBPM; 
   const noteTimeLen = beatDuration * durationVal;
 
-  // ★BPM120以上なら半音上げる判定
-  const pitchOffset = (currentBPM >= 120) ? 1 : 0;
+  // ★ 平均BPMが120以上なら半音上げる
+  const pitchOffset = (smoothedBPM >= 120) ? 1 : 0;
   const freq = noteToFreq(noteName, pitchOffset);
 
   // 音を鳴らす
   playTone(freq, now, noteTimeLen);
   
-  // 表示更新
   document.getElementById("status").innerText = 
     `再生中: ${usePatternA?"A":"B"} (${currentNoteIndex+1}/${currentPattern.length})`;
 
   // 次の音の予約
-  // setTimeoutを使って「この音が終わる頃」に次の関数を呼ぶ
-  // ※ Web Audio APIの時間管理とは別に、JSの実行タイミングを制御する
   setTimeout(() => {
     currentNoteIndex++;
-    playNextNote(); // 再帰呼び出し
+    playNextNote(); 
   }, noteTimeLen * 1000); 
 }
 
 // ---------------------------
-// 単音再生用関数
+// 単音再生用関数（柔らかい音設定）
 // ---------------------------
 function playTone(freq, time, duration) {
   const osc = audioCtx.createOscillator();
   const gain = audioCtx.createGain();
 
-  osc.type = "square";
+  // ★ 変更点: 三角波で柔らかく
+  osc.type = "triangle"; 
   osc.frequency.value = freq;
 
-  // 歯切れよくするため、音の長さを少し短くする(0.9倍)
+  // 音の終わり（少し短くして歯切れよくするのは維持）
   const soundEnd = time + (duration * 0.9);
 
+  // ★ エンベロープ調整（柔らかめ）
   gain.gain.setValueAtTime(0, time);
-  gain.gain.linearRampToValueAtTime(0.15, time + 0.01); 
+  // アタックを少し遅く(0.01 -> 0.04)して「ポワッ」とさせる
+  gain.gain.linearRampToValueAtTime(0.3, time + 0.04); 
   gain.gain.exponentialRampToValueAtTime(0.001, soundEnd);
 
   osc.connect(gain).connect(audioCtx.destination);
@@ -155,12 +171,9 @@ function playTone(freq, time, duration) {
   osc.stop(time + duration);
 }
 
-// ---------------------------
-// シーケンス終了処理
-// ---------------------------
 function finishSequence() {
   isPlaying = false;
-  usePatternA = !usePatternA; // 次回のためにパターン反転
+  usePatternA = !usePatternA; 
   document.getElementById("status").innerText = "待機中...";
 }
 </script>
