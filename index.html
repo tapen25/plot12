@@ -129,15 +129,26 @@ function playNextNote() {
   const beatDuration = 60 / smoothedBPM; 
   const noteTimeLen = beatDuration * durationVal;
 
-  // ★ 平均BPMが120以上なら半音上げる
-  const pitchOffset = (smoothedBPM >= 120) ? 1 : 0;
-  const freq = noteToFreq(noteName, pitchOffset);
+  // ★ ベースのピッチオフセット（従来の挙動を維持）
+  const baseOffset = (smoothedBPM >= 120) ? 1 : 0;
 
-  // 音を鳴らす
-  playTone(freq, now, noteTimeLen);
+  // ★ BPMに応じてハーモニー層を決定
+  // 120以上で長3度(+4), 160以上でさらに完全5度(+7)を追加
+  let harmonyIntervals = [0]; // semitone offsets relative to baseOffset
+  if (smoothedBPM >= 160) {
+    harmonyIntervals = [0, 4, 7];
+  } else if (smoothedBPM >= 120) {
+    harmonyIntervals = [0, 4];
+  }
+
+  // 各レイヤーの周波数配列を作る
+  const freqs = harmonyIntervals.map(i => noteToFreq(noteName, baseOffset + i));
+
+  // 複数レイヤーを鳴らす
+  playTone(freqs, now, noteTimeLen);
   
   document.getElementById("status").innerText = 
-    `再生中: ${usePatternA?"A":"B"} (${currentNoteIndex+1}/${currentPattern.length})`;
+    `再生中: ${usePatternA?"A":"B"} (${currentNoteIndex+1}/${currentPattern.length}) ${harmonyIntervals.length>1 ? "＋ハモリ" : ""}`;
 
   // 次の音の予約
   setTimeout(() => {
@@ -145,30 +156,40 @@ function playNextNote() {
     playNextNote(); 
   }, noteTimeLen * 1000); 
 }
-
 // ---------------------------
-// 単音再生用関数（柔らかい音設定）
+// 単音再生用関数（複数レイヤー対応、柔らかい音設定）
 // ---------------------------
-function playTone(freq, time, duration) {
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
+function playTone(freqs, time, duration) {
+  // freqs: 周波数の配列（長さ1以上）
+  // レイヤーごとの相対音量
+  const layerGains = [0.30, 0.18, 0.12];
 
-  // ★ 変更点: 三角波で柔らかく
-  osc.type = "triangle"; 
-  osc.frequency.value = freq;
-
-  // 音の終わり（少し短くして歯切れよくするのは維持）
   const soundEnd = time + (duration * 0.9);
 
-  // ★ エンベロープ調整（柔らかめ）
-  gain.gain.setValueAtTime(0, time);
-  // アタックを少し遅く(0.01 -> 0.04)して「ポワッ」とさせる
-  gain.gain.linearRampToValueAtTime(0.3, time + 0.04); 
-  gain.gain.exponentialRampToValueAtTime(0.001, soundEnd);
+  freqs.forEach((freq, idx) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
 
-  osc.connect(gain).connect(audioCtx.destination);
-  osc.start(time);
-  osc.stop(time + duration);
+    osc.type = "triangle";
+    osc.frequency.value = freq;
+
+    // ちょっとだけデチューン/位相差を付けることで豊かな重なりにする
+    // 中間レイヤーは微妙にマイナス、上の層はプラスに
+    if (osc.detune) {
+      const detuneCents = idx === 0 ? 0 : (idx % 2 === 0 ? 6 : -6);
+      osc.detune.value = detuneCents;
+    }
+
+    const lg = layerGains[idx] !== undefined ? layerGains[idx] : 0.08;
+
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(lg, time + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.001, soundEnd);
+
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(time);
+    osc.stop(time + duration);
+  });
 }
 
 function finishSequence() {
