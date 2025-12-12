@@ -32,6 +32,9 @@ let scheduledFinishTimer = null;
 let tempoWatchTimer = null;
 let devMotionAttached = false;
 
+// ノイズバッファ（足音用）
+let noiseBuffer = null;
+
 // ---------------------------
 // 音名 -> 周波数
 // ---------------------------
@@ -48,6 +51,21 @@ function noteToFreq(note, offset = 0) {
 }
 
 // ---------------------------
+// ノイズバッファ作成（足音用）
+// ---------------------------
+function ensureNoiseBuffer() {
+  if (!audioCtx || noiseBuffer) return;
+  const len = audioCtx.sampleRate * 0.2; // 0.2s の短いノイズ
+  const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) {
+    // 短いランダムノイズ（徐々に減衰）
+    data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  }
+  noiseBuffer = buf;
+}
+
+// ---------------------------
 // スタートボタン
 // ---------------------------
 document.getElementById("start").onclick = async () => {
@@ -57,6 +75,9 @@ document.getElementById("start").onclick = async () => {
   if (audioCtx.state === 'suspended') {
     await audioCtx.resume();
   }
+
+  ensureNoiseBuffer();
+
   if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
     try { await DeviceMotionEvent.requestPermission(); } catch(e) { /* iOS で拒否されたら無視 */ }
   }
@@ -131,6 +152,7 @@ function schedulePattern(isA, tempo, startTime) {
   let accumBeats = 0;
   const beatDuration = 60 / tempo;
 
+  // 音符スケジュール
   pattern.forEach((noteName, idx) => {
     const durationVal = durations[idx];
     const noteStart = startTime + accumBeats * beatDuration;
@@ -161,6 +183,15 @@ function schedulePattern(isA, tempo, startTime) {
     accumBeats += durationVal;
   });
 
+  // 足音をビート（1拍ごと）でスケジュール
+  // 強調（アクセント）は各パターンの1拍目にのみ入れる
+  const totalBeats = Math.ceil(accumBeats);
+  for (let b = 0; b < totalBeats; b++) {
+    const t = startTime + b * beatDuration;
+    const accent = (b === 0); // 1拍目を強く
+    playFootstep(t, accent);
+  }
+
   // 次パターン開始の予約（少し余裕を持たせる）
   const totalDuration = accumBeats * beatDuration;
   if (scheduledFinishTimer) clearTimeout(scheduledFinishTimer);
@@ -171,24 +202,28 @@ function schedulePattern(isA, tempo, startTime) {
 }
 
 // ---------------------------
-// パターン終了時（ここでテンポを更新して次の小節をスケジュール）
+// 足音再生（ノイズバースト + フィルタ + エンベロープ）
 // ---------------------------
-function onPatternEnd() {
-  if (!isPlaying) return;
-  // 次の小節頭でテンポを更新（pendingTempoがあればそれを使う）
-  if (pendingTempo) {
-    tempoAtStart = pendingTempo;
-    pendingTempo = null;
-  } else {
-    tempoAtStart = Math.max(60, Math.min(200, Math.round(smoothedBPM)));
-  }
+function playFootstep(time, accent = false) {
+  if (!audioCtx || !noiseBuffer) return;
+  const src = audioCtx.createBufferSource();
+  src.buffer = noiseBuffer;
 
-  // パターン切替
-  usePatternA = !usePatternA;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = "bandpass";
+  filter.frequency.value = accent ? 900 : 700;
+  filter.Q = 0.7;
 
-  // 次パターンはすこし先から開始（50ms）
-  sequenceStartTime = audioCtx.currentTime + 0.05;
-  schedulePattern(usePatternA, tempoAtStart, sequenceStartTime);
+  const gain = audioCtx.createGain();
+  const baseGain = accent ? 0.35 : 0.18;
+  // 短いアタックで自然な減衰
+  gain.gain.setValueAtTime(0.0001, time);
+  gain.gain.exponentialRampToValueAtTime(baseGain, time + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.12);
+
+  src.connect(filter).connect(gain).connect(audioCtx.destination);
+  src.start(time);
+  src.stop(time + 0.15);
 }
 
 // ---------------------------
@@ -198,7 +233,7 @@ function onPatternEnd() {
 // サウンド生成：同じフレーズを違う楽器で鳴らす
 // ---------------------------
 function playTone(freqs, time, duration) {
-  // 今回は 1音しか来ないので freqs[0] を使う
+  // 今回は freqs[0] を使う（ハーモニーは freqs 配列で処理済みなら別実装へ変更可）
   const freq = freqs[0];
 
   // 楽器レイヤー
