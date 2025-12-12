@@ -1,13 +1,36 @@
 <button id="start">Start</button>
 <script>
 let audioCtx;
-let lastTrigger = 0;
-const threshold = 12; // 加速度衝撃のしきい値
+let usePatternA = true;
 
-document.getElementById('start').onclick = async () => {
+// 2小節＝16個の8分音符 × 2パターン
+const patterns = {
+  A: [
+    "C4","D4","E4","G4","E4","D4","C4","C4",
+    "C4","E4","G4","A4","G4","E4","D4","C4"
+  ],
+  B: [
+    "G4","A4","C5","A4","G4","E4","D4","C4",
+    "D4","E4","G4","E4","D4","C4","C4","D4"
+  ]
+};
+
+// ---------------------------
+// ペンタトニック音階 → 周波数換算
+// ---------------------------
+function noteToFreq(note) {
+  const map = {
+    C4:-9, D4:-7, E4:-5, G4:-2, A4:0,
+    C5:3
+  };
+  const semitone = map[note];
+  return 440 * Math.pow(2, semitone/12);
+}
+
+document.getElementById("start").onclick = async () => {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-  // iOS用：ユーザー操作後にセンサー許可
+  // iOS のセンサー許可
   if (DeviceMotionEvent.requestPermission) {
     await DeviceMotionEvent.requestPermission();
   }
@@ -15,56 +38,64 @@ document.getElementById('start').onclick = async () => {
   window.addEventListener("devicemotion", handleMotion);
 };
 
+// ---------------------------
+// 加速度 → BPM に変換
+// ---------------------------
+let lastTrigger = 0;
+
 function handleMotion(e) {
   const acc = e.accelerationIncludingGravity;
   if (!acc) return;
 
-  const magnitude = Math.sqrt(acc.x**2 + acc.y**2 + acc.z**2);
+  const mag = Math.sqrt(acc.x**2 + acc.y**2 + acc.z**2);
+
+  // 揺れが強いほど BPM が速くなる
+  const BPM = mapAccelToBPM(mag);
 
   const now = performance.now();
-  if (magnitude > threshold && now - lastTrigger > 200) {
+  if (mag > 13 && now - lastTrigger > 500) { // 歩行トリガー
     lastTrigger = now;
-    playFootstep(magnitude);
+    playPatternWithBPM(BPM);
   }
 }
 
-function playFootstep(strength) {
-  const t = audioCtx.currentTime;
+function mapAccelToBPM(a) {
+  // だいたい 60〜180 BPM にマッピング
+  const bpm = 60 + Math.min(120, (a - 10) * 10);
+  return bpm;
+}
 
-  // ---------- Impact Layer ----------
-  const impact = audioCtx.createBufferSource();
-  const buffer = audioCtx.createBuffer(1, 4410, 44100);
-  const data = buffer.getChannelData(0);
-  for (let i = 0; i < 200; i++) data[i] = (Math.random() * 2 - 1) * 0.6; 
-  impact.buffer = buffer;
+// ---------------------------
+// パターン（A or B）を BPM で再生
+// ---------------------------
+function playPatternWithBPM(bpm) {
+  const now = audioCtx.currentTime;
+  const pattern = usePatternA ? patterns.A : patterns.B;
+  usePatternA = !usePatternA;
 
-  const impactGain = audioCtx.createGain();
-  impactGain.gain.setValueAtTime(0, t);
-  impactGain.gain.linearRampToValueAtTime(0.5, t + 0.01);
-  impactGain.gain.linearRampToValueAtTime(0, t + 0.05);
+  // 8分音符の長さ（秒）
+  const eighth = (60 / bpm) / 2;
 
-  // ---------- Texture Layer ----------
-  const noise = audioCtx.createBufferSource();
-  const buf = audioCtx.createBuffer(1, 44100, 44100);
-  const d = buf.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2 - 1) * 0.2;
-  noise.buffer = buf;
+  pattern.forEach((note, i) => {
+    const freq = noteToFreq(note);
 
-  const textureGain = audioCtx.createGain();
-  textureGain.gain.setValueAtTime(0, t);
-  textureGain.gain.linearRampToValueAtTime(0.3, t + 0.03);
-  textureGain.gain.linearRampToValueAtTime(0, t + 0.15);
+    const t = now + i * eighth;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
 
-  // ---------- Dynamics Layer ----------
-  const filter = audioCtx.createBiquadFilter();
-  filter.type = "lowpass";
-  filter.frequency.value = 1000 + strength * 80; // 歩行の強さ → 明るさ
+    osc.frequency.value = freq;
 
-  // MIX
-  impact.connect(impactGain).connect(filter).connect(audioCtx.destination);
-  noise.connect(textureGain).connect(filter).connect(audioCtx.destination);
+    // ちょっと跳ねるゲーム音風 ADSR
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(0.25, t + 0.03);
+    gain.gain.linearRampToValueAtTime(0, t + eighth * 0.9);
 
-  impact.start(t);
-  noise.start(t);
+    osc.connect(gain).connect(audioCtx.destination);
+
+    osc.start(t);
+    osc.stop(t + eighth);
+  });
+
+  console.log("Playing at BPM:", bpm);
 }
 </script>
