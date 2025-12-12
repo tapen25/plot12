@@ -194,33 +194,38 @@ function onPatternEnd() {
 // ---------------------------
 // サウンド生成（既存の実装を流用）
 // ---------------------------
+// ---------------------------
+// サウンド生成：同じフレーズを違う楽器で鳴らす
+// ---------------------------
 function playTone(freqs, time, duration) {
-  const layerGains = [0.30, 0.18, 0.12];
-  const soundEnd = time + (duration * 0.9);
+  // 今回は 1音しか来ないので freqs[0] を使う
+  const freq = freqs[0];
 
-  freqs.forEach((freq, idx) => {
+  // 楽器レイヤー
+  const instruments = [
+    { type: "triangle", gain: 0.30 },
+    { type: "square",   gain: 0.15 },
+    { type: "sine",     gain: 0.12 }
+  ];
+
+  instruments.forEach(inst => {
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
 
-    osc.type = "triangle";
+    osc.type = inst.type;
     osc.frequency.value = freq;
 
-    if (osc.detune) {
-      const detuneCents = idx === 0 ? 0 : (idx % 2 === 0 ? 6 : -6);
-      osc.detune.value = detuneCents;
-    }
-
-    const lg = layerGains[idx] !== undefined ? layerGains[idx] : 0.08;
-
+    // アタック & リリース
     gain.gain.setValueAtTime(0, time);
-    gain.gain.linearRampToValueAtTime(lg, time + 0.04);
-    gain.gain.exponentialRampToValueAtTime(0.001, soundEnd);
+    gain.gain.linearRampToValueAtTime(inst.gain, time + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.001, time + duration * 0.9);
 
     osc.connect(gain).connect(audioCtx.destination);
     osc.start(time);
     osc.stop(time + duration);
   });
 }
+
 
 // ---------------------------
 // 停止処理（必要なら外部で呼べる）
