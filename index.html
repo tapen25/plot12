@@ -1,101 +1,133 @@
 <button id="start">Start</button>
+<div id="status">停止中</div>
 <script>
 let audioCtx;
 let usePatternA = true;
+let isPlaying = false; // 再生中かどうかのフラグ
 
-// 2小節＝16個の8分音符 × 2パターン
+// ノート（音程）の定義
 const patterns = {
-  A: [
-    "C4","D4","E4","G4","E4","D4","C4","C4",
-    "C4","E4","G4","A4","G4","E4","D4","C4"
-  ],
-  B: [
-    "G4","A4","C5","A4","G4","E4","D4","C4",
-    "D4","E4","G4","E4","D4","C4","C4","D4"
-  ]
+  A: ["D4","C4","B3","D4", "C4","A3", "G3","A3", "B3"],
+  B: ["D4","C4","B3","D4", "C4","A3", "G3","B3", "G3"]
 };
 
+// リズム（長さ）の定義：1拍を1.0とする
+// D4, C4, B3, D4 (16分=0.25) | C4, A3 (8分=0.5) | G3, A3 (8分=0.5) | B3 (4分=1.0)
+const durations = [0.25, 0.25, 0.25, 0.25, 0.5, 0.5, 0.5, 0.5, 1.0];
+
 // ---------------------------
-// ペンタトニック音階 → 周波数換算
+// 音名 → 周波数換算 (A4=440Hz基準)
 // ---------------------------
 function noteToFreq(note) {
+  // A4(440Hz) を 0 としたときの半音の距離
   const map = {
-    C4:-9, D4:-7, E4:-5, G4:-2, A4:0,
-    C5:3
+    G3: -14, A3: -12, B3: -10,
+    C4: -9,  D4: -7,  E4: -5, F4: -4, G4: -2, A4: 0, B4: 2,
+    C5: 3
   };
+  
   const semitone = map[note];
+  // mapにない音が来た場合の安全策 (A4にする)
+  if (semitone === undefined) return 440; 
+  
   return 440 * Math.pow(2, semitone/12);
 }
 
 document.getElementById("start").onclick = async () => {
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  // AudioContextがサスペンド状態なら再開
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume();
+  }
 
   // iOS のセンサー許可
-  if (DeviceMotionEvent.requestPermission) {
+  if (typeof DeviceMotionEvent.requestPermission === 'function') {
     await DeviceMotionEvent.requestPermission();
   }
 
   window.addEventListener("devicemotion", handleMotion);
+  document.getElementById("status").innerText = "センサー待機中...";
 };
 
 // ---------------------------
-// 加速度 → BPM に変換
+// 加速度 → BPM に変換 & トリガー
 // ---------------------------
-let lastTrigger = 0;
-
 function handleMotion(e) {
+  // 再生中なら何もしない（ロック）
+  if (isPlaying) return;
+
   const acc = e.accelerationIncludingGravity;
   if (!acc) return;
 
   const mag = Math.sqrt(acc.x**2 + acc.y**2 + acc.z**2);
 
-  // 揺れが強いほど BPM が速くなる
-  const BPM = mapAccelToBPM(mag);
-
-  const now = performance.now();
-  if (mag > 13 && now - lastTrigger > 500) { // 歩行トリガー
-    lastTrigger = now;
+  // 歩行トリガー（閾値調整）
+  if (mag > 13) {
+    const BPM = mapAccelToBPM(mag);
     playPatternWithBPM(BPM);
   }
 }
 
 function mapAccelToBPM(a) {
-  // だいたい 60〜180 BPM にマッピング
-  const bpm = 60 + Math.min(120, (a - 10) * 10);
-  return bpm;
+  // 揺れに合わせてBPM60〜140程度に可変
+  return 60 + Math.min(80, (a - 10) * 5);
 }
 
 // ---------------------------
-// パターン（A or B）を BPM で再生
+// パターン再生
 // ---------------------------
 function playPatternWithBPM(bpm) {
+  isPlaying = true; // ロック開始
+  document.getElementById("status").innerText = `再生中 (BPM:${Math.floor(bpm)}) Pattern: ${usePatternA ? "A" : "B"}`;
+
   const now = audioCtx.currentTime;
-  const pattern = usePatternA ? patterns.A : patterns.B;
-  usePatternA = !usePatternA;
+  const noteNames = usePatternA ? patterns.A : patterns.B;
+  
+  // 1拍の長さ（秒）
+  const beatDuration = 60 / bpm;
+  
+  // 次の音の発音予定時刻
+  let nextNoteTime = now;
 
-  // 8分音符の長さ（秒）
-  const eighth = (60 / bpm) / 2;
-
-  pattern.forEach((note, i) => {
+  noteNames.forEach((note, i) => {
     const freq = noteToFreq(note);
+    const durationVal = durations[i]; // 0.25, 0.5, 1.0 など
+    
+    // 実際の音の長さ（秒）
+    const noteTimeLen = beatDuration * durationVal;
 
-    const t = now + i * eighth;
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
 
     osc.frequency.value = freq;
+    osc.type = "square"; // ゲームっぽい音色（矩形波）
 
-    // ちょっと跳ねるゲーム音風 ADSR
-    gain.gain.setValueAtTime(0, t);
-    gain.gain.linearRampToValueAtTime(0.25, t + 0.03);
-    gain.gain.linearRampToValueAtTime(0, t + eighth * 0.9);
+    // エンベロープ（音の減衰）
+    // 音の長さギリギリまで鳴らすと繋がって聞こえるので、少し短め(0.8倍)に切る
+    const releaseTime = nextNoteTime + (noteTimeLen * 0.8);
+    
+    gain.gain.setValueAtTime(0, nextNoteTime);
+    gain.gain.linearRampToValueAtTime(0.1, nextNoteTime + 0.01); // アタック
+    gain.gain.exponentialRampToValueAtTime(0.001, releaseTime);   // ディケイ
 
     osc.connect(gain).connect(audioCtx.destination);
 
-    osc.start(t);
-    osc.stop(t + eighth);
+    osc.start(nextNoteTime);
+    osc.stop(nextNoteTime + noteTimeLen);
+
+    // 次の音の開始時間を更新
+    nextNoteTime += noteTimeLen;
   });
 
-  console.log("Playing at BPM:", bpm);
+  // 全体の再生が終わったタイミングでロック解除 & パターン切り替え
+  // 最後の音の終了時刻に合わせて解除予約
+  const totalDuration = nextNoteTime - now;
+  setTimeout(() => {
+    isPlaying = false;
+    usePatternA = !usePatternA; // 次回のためにパターン反転
+    document.getElementById("status").innerText = "待機中...";
+  }, totalDuration * 1000);
 }
 </script>
