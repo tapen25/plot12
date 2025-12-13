@@ -1,48 +1,79 @@
-<button id="start">Start (iOSは要タップ)</button>
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Walking Interaction: Timbre Agency</title>
+<style>
+  body { font-family: sans-serif; padding: 20px; background: #f0f0f0; }
+  #status { font-size: 1.2rem; margin: 10px 0; font-weight: bold; }
+  #debug { 
+    background: #333; color: #0f0; padding: 10px; 
+    border-radius: 5px; font-family: monospace; white-space: pre-wrap;
+  }
+  button { padding: 10px 20px; font-size: 1rem; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<h3>歩行インタラクション実験 (Timbre Agency)</h3>
+<p>BPMは4秒平均で安定追従、音色(明るさ)は入力エネルギーに敏感に反応します。</p>
+
+<button id="start">Start (Sensor & Audio)</button>
 <div id="status">停止中</div>
-<div id="debug">BPM: 0</div>
+<div id="debug">Waiting...</div>
 
 <script>
 let audioCtx;
 let isPlaying = false;
 
-// パターン切替
+// ---------------------------
+// パラメータ設定
+// ---------------------------
+// BPM計算用の履歴期間（4秒＝安定重視）
+const BPM_HISTORY_DURATION = 4000;
+// 音色計算用の履歴期間（0.5秒＝応答性重視）
+const TIMBRE_HISTORY_DURATION = 500;
+
+// データ履歴
+let motionHistory = []; 
+
+// 状態変数
+let currentBPM = 60;        // 現在のBPM
+let currentEnergy = 0;      // 現在の運動エネルギー(0.0 - 1.0)
+let targetCutoff = 400;     // フィルター周波数(Hz)
+let targetVolume = 0.3;     // 音量
+
+// スケジューリング用
+let nextBarTime = 0;
 let usePatternA = true;
 
-// 平均BPM（2秒平均）
-let smoothedBPM = 60;
-
-// 加速度の履歴
-let motionHistory = [];
-const HISTORY_DURATION = 2000;
-
-// 小節スケジューリング用
-let nextBarTime = 0;
-const beatsPerMeasure = 4;
-
-// パターン定義
+// ---------------------------
+// 音楽データ定義
+// ---------------------------
 const patterns = {
-  A: ["D4","C4","B3","D4","C4","A3","G3","A3","B3"],
-  B: ["D4","C4","B3","D4","C4","A3","G3","B3","G3"]
+  // 少しメロディアスに
+  A: ["C4","C4","G4","G4","A4","A4","G4",null], 
+  B: ["F4","F4","E4","E4","D4","D4","C4",null]
 };
+// 全て4分音符
+const durations = [1,1,1,1,1,1,1,1]; 
 
-// リズム（4分＝1.0）
-const durations = [0.25,0.25,0.25,0.25,0.5,0.5,0.5,0.5,1.0];
-
-// ---------------------------
-// 音名→周波数
-// ---------------------------
-function noteToFreq(note, offset = 0) {
-  const map = {
-    G3:-14, A3:-12, B3:-10,
-    C4:-9,  D4:-7,  E4:-5, F4:-4, G4:-2, A4:0, B4:2,
-    C5:3
-  };
-  let semitone = map[note] ?? 0;
-  semitone += offset;
-  return 440 * Math.pow(2, semitone/12);
+// 音名→周波数変換
+function noteToFreq(note) {
+  if(!note) return 0;
+  const notes = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+  const octave = parseInt(note.slice(-1));
+  const key = note.slice(0, -1);
+  const semitone = notes.indexOf(key);
+  const A4 = 440;
+  const distFromA4 = (octave - 4) * 12 + (semitone - 9);
+  return A4 * Math.pow(2, distFromA4 / 12);
 }
 
+// ---------------------------
+// 初期化処理
+// ---------------------------
 document.getElementById("start").onclick = async () => {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -51,124 +82,158 @@ document.getElementById("start").onclick = async () => {
     await audioCtx.resume();
   }
 
-  if (typeof DeviceMotionEvent.requestPermission === "function") {
-    await DeviceMotionEvent.requestPermission();
+  // iOS 13+ 加速度センサー許可
+  if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+    try {
+      await DeviceMotionEvent.requestPermission();
+    } catch (e) {
+      console.error(e);
+    }
   }
 
   window.addEventListener("devicemotion", handleMotion);
-  document.getElementById("status").innerText = "センサー待機中...";
+  document.getElementById("status").innerText = "歩いてください (センサー作動中)";
+  
+  // シーケンス強制開始（音は出るが、最初は遅く・こもっている）
+  if (!isPlaying) startSequence();
 };
 
 // ---------------------------
-// センサー処理 → 平均BPM算出
+// センサー処理 (Dual Smoothing)
 // ---------------------------
 function handleMotion(e) {
-  const acc = e.accelerationIncludingGravity;
+  const acc = e.accelerationIncludingGravity; // 重力込みの方が「揺れ」を拾いやすい場合があるため
   if (!acc) return;
 
-  const mag = Math.sqrt(acc.x**2 + acc.y**2 + acc.z**2);
+  // ベクトル合成（重力成分を除去するために簡易的なハイパスフィルタ相当の処理を入れるのが理想だが、ここでは変化量を見る）
+  // 簡易的に重力加速度(約9.8)を引いた絶対値の変動を見る
+  const x = acc.x || 0;
+  const y = acc.y || 0;
+  const z = acc.z || 0;
+  const mag = Math.sqrt(x*x + y*y + z*z);
+  
+  // 静止時が約9.8なので、そこからの振れ幅を取得
+  const diff = Math.abs(mag - 9.8); 
+
   const now = performance.now();
+  motionHistory.push({ time: now, val: diff });
 
-  motionHistory.push({time: now, val: mag});
-  motionHistory = motionHistory.filter(i => now - i.time < HISTORY_DURATION);
+  // 古い履歴を削除 (最大4秒分保持)
+  motionHistory = motionHistory.filter(i => now - i.time < BPM_HISTORY_DURATION);
 
-  let sum = 0;
-  motionHistory.forEach(i => sum += i.val);
-  const avg = sum / motionHistory.length || 0;
+  // 1. BPM用の計算 (4秒間の平均 -> 安定)
+  const bpmAvg = getAverageMagnitude(motionHistory, BPM_HISTORY_DURATION);
+  // 加速度 1.0(ゆっくり)〜8.0(激しい) を BPM 60〜140 にマップ
+  let targetBPM = 60 + (bpmAvg * 10); 
+  targetBPM = Math.min(Math.max(targetBPM, 60), 160); // Clamp
+  
+  // BPMをゆっくり追従させる (急激な変化を防ぐ)
+  currentBPM += (targetBPM - currentBPM) * 0.05; 
 
-  smoothedBPM = mapAccelToBPM(avg);
+  // 2. 音色(Timbre)用の計算 (0.5秒間の平均 -> 高反応)
+  const timbreAvg = getAverageMagnitude(motionHistory, TIMBRE_HISTORY_DURATION);
+  // エネルギーレベル (0.0 〜 1.0)
+  currentEnergy = Math.min(timbreAvg / 6.0, 1.0); 
 
-  const isHigh = smoothedBPM >= 120;
-  document.getElementById("debug").innerText =
-    `Avg BPM: ${Math.floor(smoothedBPM)} ${isHigh?"🔥HIGH":""}`;
+  // マッピング: 
+  // 低エネルギー: 400Hz (こもった音) 〜 高エネルギー: 3000Hz (明るい音)
+  targetCutoff = 400 + (currentEnergy * 2600);
+  
+  // マッピング: 音量
+  // 低エネルギー: 小さい 〜 高エネルギー: 大きい
+  targetVolume = 0.2 + (currentEnergy * 0.5);
 
-  // 開始トリガー
-  if (!isPlaying && mag > 15) {
-    startSequence();
-  }
+  updateDebugDisplay();
 }
 
-function mapAccelToBPM(a) {
-  let bpm = 100 + (a - 10) * 8;
-  if (bpm < 60) bpm = 60;
-  if (bpm > 200) bpm = 200;
-  return bpm;
+function getAverageMagnitude(history, durationMs) {
+  const now = performance.now();
+  const targetItems = history.filter(i => now - i.time < durationMs);
+  if (targetItems.length === 0) return 0;
+  const sum = targetItems.reduce((a, b) => a + b.val, 0);
+  return sum / targetItems.length;
+}
+
+function updateDebugDisplay() {
+  const bar = "█".repeat(Math.floor(currentEnergy * 20));
+  document.getElementById("debug").innerText = 
+    `BPM    : ${Math.floor(currentBPM)} (安定)\n` +
+    `Timbre : ${Math.floor(targetCutoff)}Hz (敏感)\n` +
+    `Energy : [${bar.padEnd(20, " ")}]`;
 }
 
 // ---------------------------
-// シーケンス開始
+// シーケンス制御
 // ---------------------------
 function startSequence() {
   isPlaying = true;
-  nextBarTime = audioCtx.currentTime + 0.1; // 初回の小節頭
-  document.getElementById("status").innerText = "再生中...";
+  nextBarTime = audioCtx.currentTime + 0.1;
+  loop();
 }
 
-// ---------------------------
-// 1小節分をまとめてスケジューリング
-// ---------------------------
-function scheduleBar() {
-  const pattern = usePatternA ? patterns.A : patterns.B;
-  const beatDur = 60 / smoothedBPM;
+function loop() {
+  // 先読みスケジューリング (25ms間隔でチェック)
   const now = audioCtx.currentTime;
-
-  // 初回処理：nextBarTime が過去だったら補正
-  if (nextBarTime < now) {
-    nextBarTime = now + 0.05;
+  // lookahead: 0.1秒
+  if (nextBarTime < now + 0.1) {
+    scheduleBar(nextBarTime);
   }
+  requestAnimationFrame(loop);
+}
 
-  let cursor = nextBarTime;
-  const totalBeats = durations.reduce((a,b)=>a+b, 0);
+function scheduleBar(startTime) {
+  const pattern = usePatternA ? patterns.A : patterns.B;
+  const secondsPerBeat = 60.0 / currentBPM; // 現在の平均BPMを使用
+  
+  let noteTime = startTime;
 
-  for (let i = 0; i < pattern.length; i++) {
-    const beatLen = durations[i];
-    const durSec = beatLen * beatDur;
+  pattern.forEach((note, index) => {
+    if (note) {
+      // 発音時に現在のターゲットパラメータを渡す
+      playTone(note, noteTime, secondsPerBeat, targetCutoff, targetVolume);
+    }
+    noteTime += secondsPerBeat;
+  });
 
-    const pitchOffset = smoothedBPM >= 120 ? 1 : 0;
-    const freq = noteToFreq(pattern[i], pitchOffset);
-
-    playTone(freq, cursor, durSec);
-    cursor += durSec;
-  }
-
-  // 次の小節頭へ
-  nextBarTime += totalBeats * beatDur;
-
-  document.getElementById("status").innerText =
-    `再生中: ${usePatternA ? "A" : "B"} (1小節完了)`;
-
+  // 次の小節の開始時間
+  nextBarTime += secondsPerBeat * pattern.length;
   usePatternA = !usePatternA;
 }
 
 // ---------------------------
-// 音再生（三角波で柔らかい音）
+// 音声合成 (Sawtooth + LPF)
 // ---------------------------
-function playTone(freq, time, dur) {
+function playTone(note, time, duration, cutoff, volume) {
   const osc = audioCtx.createOscillator();
   const gain = audioCtx.createGain();
+  const filter = audioCtx.createBiquadFilter();
 
-  osc.type = "triangle";
-  osc.frequency.value = freq;
+  // 1. オシレーター設定 (ノコギリ波＝倍音が豊富)
+  osc.type = "sawtooth";
+  osc.frequency.value = noteToFreq(note);
 
-  const end = time + dur * 0.9;
+  // 2. フィルター設定 (ここが「主体感」のキモ)
+  filter.type = "lowpass";
+  filter.Q.value = 5; // レゾナンスを少し入れて変化をわかりやすくする
+  // フィルターのエンベロープ (アタック感)
+  filter.frequency.setValueAtTime(cutoff, time);
+  // 少し減衰させることで楽器らしさを出す
+  filter.frequency.exponentialRampToValueAtTime(Math.max(cutoff * 0.5, 100), time + duration - 0.05);
 
+  // 3. アンプ設定 (音量)
   gain.gain.setValueAtTime(0, time);
-  gain.gain.linearRampToValueAtTime(0.3, time + 0.04);
-  gain.gain.exponentialRampToValueAtTime(0.001, end);
+  gain.gain.linearRampToValueAtTime(volume, time + 0.05);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + duration - 0.05);
 
-  osc.connect(gain).connect(audioCtx.destination);
+  // 接続
+  osc.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  // 再生
   osc.start(time);
-  osc.stop(time + dur);
+  osc.stop(time + duration);
 }
-
-// ---------------------------
-// 25msごとに先読みスケジューリング
-// ---------------------------
-setInterval(() => {
-  if (!isPlaying) return;
-  const now = audioCtx.currentTime;
-  if (nextBarTime - now < 0.1) {
-    scheduleBar();
-  }
-}, 25);
 </script>
+</body>
+</html>
