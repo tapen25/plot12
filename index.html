@@ -3,21 +3,21 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Walking Agency Filter Test</title>
+<title>Walking Agency: Multi-Layer Tone</title>
 <style>
-  body { font-family: sans-serif; padding: 20px; text-align: center; background: #f0f0f0; }
+  body { font-family: sans-serif; padding: 20px; text-align: center; background: #f0f0f0; user-select: none; }
   button { font-size: 1.2rem; padding: 15px 30px; border-radius: 8px; border: none; background: #007AFF; color: white; cursor: pointer; }
   #status { margin-top: 20px; font-weight: bold; font-size: 1.2rem; }
-  #debug { margin-top: 10px; color: #555; font-family: monospace; }
-  #params { margin-top: 10px; font-size: 0.9rem; color: #333; }
+  #debug { margin-top: 10px; color: #555; font-family: monospace; font-size: 1.2rem;}
+  #params { margin-top: 10px; font-size: 0.9rem; color: #333; height: 1.2em; }
 </style>
 </head>
 <body>
 
 <button id="start">Start (iOSは要タップ)</button>
 <div id="status">停止中</div>
-<div id="debug">BPM: 0</div>
-<div id="params">Tone: ---</div>
+<div id="debug">BPM: 100</div>
+<div id="params"></div>
 
 <script>
 let audioCtx;
@@ -26,12 +26,11 @@ let isPlaying = false;
 // パターン切替
 let usePatternA = true;
 
-// 平均BPM（初期値）
-let smoothedBPM = 60;
+// 平均BPM（初期値は範囲の下限に）
+let smoothedBPM = 100;
 
 // 加速度の履歴
 let motionHistory = [];
-// 要望に合わせて「3〜5秒」の中間をとって4秒に設定
 const HISTORY_DURATION = 4000; 
 
 // 小節スケジューリング用
@@ -46,17 +45,14 @@ const patterns = {
 // リズム（4分＝1.0）
 const durations = [0.25,0.25,0.25,0.25,0.5,0.5,0.5,0.5,1.0];
 
-// ---------------------------
 // 音名→周波数
-// ---------------------------
-function noteToFreq(note, offset = 0) {
+function noteToFreq(note) {
   const map = {
     G3:-14, A3:-12, B3:-10,
     C4:-9,  D4:-7,  E4:-5, F4:-4, G4:-2, A4:0, B4:2,
     C5:3
   };
   let semitone = map[note] ?? 0;
-  semitone += offset;
   return 440 * Math.pow(2, semitone/12);
 }
 
@@ -68,7 +64,7 @@ document.getElementById("start").onclick = async () => {
     await audioCtx.resume();
   }
 
-  // iOS 13+ DeviceMotion Permission
+  // iOS Permission
   if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
     try {
       const permissionState = await DeviceMotionEvent.requestPermission();
@@ -76,25 +72,21 @@ document.getElementById("start").onclick = async () => {
         alert("センサー許可が必要です");
         return;
       }
-    } catch (e) {
-      console.error(e);
-    }
+    } catch (e) { console.error(e); }
   }
 
   window.addEventListener("devicemotion", handleMotion);
-  document.getElementById("status").innerText = "歩行待機中(強めに歩いて開始)...";
+  document.getElementById("status").innerText = "歩行待機中...";
   document.getElementById("start").style.display = 'none';
 };
 
 // ---------------------------
-// センサー処理 → 平均BPM算出
+// センサー処理
 // ---------------------------
 function handleMotion(e) {
-  const acc = e.accelerationIncludingGravity; // Android/iOS差分吸収のため重力込みを使用
+  const acc = e.accelerationIncludingGravity;
   if (!acc) return;
 
-  // 重力込みのベクトル長から簡易的に動きの大きさを取る
-  // (静止時でも9.8付近になるが、相対変化を見るため簡易実装)
   const mag = Math.sqrt(acc.x**2 + acc.y**2 + acc.z**2);
   const now = performance.now();
 
@@ -110,69 +102,76 @@ function handleMotion(e) {
   motionHistory.forEach(i => sum += i.val);
   const avg = sum / motionHistory.length || 0;
 
-  // 加速度からBPMへのマッピング
   smoothedBPM = mapAccelToBPM(avg);
 
   // デバッグ表示
-  const isHigh = smoothedBPM >= 110;
+  let statusIcon = "🚶";
+  if (smoothedBPM > 115) statusIcon = "🏃";
+  if (smoothedBPM > 125) statusIcon = "🔥";
+  
   document.getElementById("debug").innerText = 
-    `Avg BPM: ${Math.floor(smoothedBPM)} ${isHigh?"🔥Active":""}`;
+    `BPM: ${Math.floor(smoothedBPM)} ${statusIcon}`;
 
-  // 音色のデバッグ表示（今のBPMでどういうフィルタになるか）
-  const fInfo = getFilterParams(smoothedBPM);
+  // 音色パラメータの可視化
+  const mix = getMixParams(smoothedBPM);
   document.getElementById("params").innerText = 
-    `Cutoff: ${Math.floor(fInfo.freq)}Hz (${fInfo.desc})`;
+    `XyloMix: ${(mix.xyloGain*100).toFixed(0)}% | Brightness: ${(mix.filterFreq/1000).toFixed(1)}`;
 
-  // 開始トリガー（閾値はデバイスによって調整が必要かもしれません）
-  // 重力分(約9.8) + 動き分。ここでは13程度を閾値に設定
-  if (!isPlaying && mag > 13) {
+  // 開始トリガー
+  if (!isPlaying && mag > 12) {
     startSequence();
   }
 }
 
-// 加速度平均値(9.8〜20くらい) を BPM(60〜160) にマップ
+// ---------------------------
+// BPMマッピング (100〜130)
+// ---------------------------
 function mapAccelToBPM(a) {
-  // 重力分(約9.8)を引いた「動き成分」で計算
+  // 重力9.8を除いた動き成分
   let val = a - 9.8; 
   if (val < 0) val = 0;
 
-  // 係数は歩き方に合わせて調整
-  let bpm = 60 + (val * 15); 
+  // 感度調整: 
+  // 軽い歩き(val=1〜2) -> 100付近
+  // しっかり歩き(val=5〜6) -> 130付近
+  let bpm = 100 + (val * 6.0); 
 
-  if (bpm < 60) bpm = 60;
-  if (bpm > 180) bpm = 180;
+  if (bpm < 100) bpm = 100;
+  if (bpm > 130) bpm = 130;
   return bpm;
 }
 
 // ---------------------------
-// フィルタパラメータの算出
+// 音色パラメータ算出
 // ---------------------------
-function getFilterParams(bpm) {
-  // BPM 60  -> Cutoff 400Hz (こもる: フルート/リコーダー風)
-  // BPM 140 -> Cutoff 3000Hz (開く: トランペット/シンセブラス風)
-  
-  // マッピング
-  let t = (bpm - 60) / (140 - 60); // 0.0 〜 1.0
-  if (t < 0) t = 0;
-  if (t > 1) t = 1;
+function getMixParams(bpm) {
+  // 範囲 100〜130 に対する 0.0〜1.0 の正規化値
+  let t = (bpm - 100) / 30; 
+  if (t < 0) t = 0; if (t > 1) t = 1;
 
-  // 指数的なカーブで開く方が自然に聞こえる
-  const minFreq = 300;
-  const maxFreq = 4000;
-  const freq = minFreq * Math.pow(maxFreq / minFreq, t);
+  // 1. ベース音の明るさ (LPF Cutoff)
+  // 100bpm: 800Hz (こもった音) -> 130bpm: 3000Hz (明るい音)
+  const filterFreq = 800 + t * 2200;
 
-  // Q値（レゾナンス）も少し変化させる（開いたときに少し鋭く）
-  const q = 1 + t * 4; 
+  // 2. ベース音のアタック感 (Attack Time)
+  // BPMが上がるとアタックを速くしてキレを出す (0.08s -> 0.02s)
+  const attackTime = 0.08 - t * 0.06;
 
-  let desc = "Soft/Muffled";
-  if (t > 0.4) desc = "Medium";
-  if (t > 0.8) desc = "Bright/Brass";
+  // 3. シロフォン(粒音)の混ざり具合
+  // BPM 115 (t=0.5) あたりから混ぜ始める
+  let xyloGain = 0;
+  if (t > 0.5) {
+    // 0.5〜1.0 の範囲を 0.0〜1.0 にマップ
+    xyloGain = (t - 0.5) * 2.0; 
+    // 最大音量は少し控えめに
+    xyloGain *= 0.6; 
+  }
 
-  return { freq, q, desc };
+  return { filterFreq, attackTime, xyloGain };
 }
 
 // ---------------------------
-// シーケンス開始
+// シーケンス制御
 // ---------------------------
 function startSequence() {
   isPlaying = true;
@@ -180,90 +179,93 @@ function startSequence() {
   document.getElementById("status").innerText = "再生中";
 }
 
-// ---------------------------
-// 1小節スケジューリング
-// ---------------------------
 function scheduleBar() {
   const pattern = usePatternA ? patterns.A : patterns.B;
-  const beatDur = 60 / smoothedBPM; // この時点のBPMで小節の長さを決定
+  const beatDur = 60 / smoothedBPM;
   const now = audioCtx.currentTime;
   
-  // 小節の開始時点でのフィルタ具合を決定
-  // ★ポイント: 1音ごとではなく小節単位で統一するか、音ごとに変えるか。
-  // ここでは「その小節の雰囲気」として統一設定しますが、
-  // エージェンシーを高めるなら playTone 呼び出し時に再計算するのもありです。
-  const filterParams = getFilterParams(smoothedBPM);
-
-  if (nextBarTime < now) {
-    nextBarTime = now + 0.05;
-  }
+  if (nextBarTime < now) nextBarTime = now + 0.05;
 
   let cursor = nextBarTime;
+  
+  // 小節の頭で音色パラメータを決定
+  const params = getMixParams(smoothedBPM);
 
   for (let i = 0; i < pattern.length; i++) {
     const beatLen = durations[i];
     const durSec = beatLen * beatDur;
+    const freq = noteToFreq(pattern[i]);
 
-    // ピッチオフセット（ハイペース時は1オクターブ上げても面白いが、今回はフィルタ実験なのでOFF）
-    const freq = noteToFreq(pattern[i], 0);
-
-    // 音セット
-    playTone(freq, cursor, durSec, filterParams);
+    // 2つのレイヤーを同時に鳴らす
+    playLayeredTone(freq, cursor, durSec, params);
     
     cursor += durSec;
   }
 
-  // 次の小節頭へ
   const totalBeats = durations.reduce((a,b)=>a+b, 0);
   nextBarTime += totalBeats * beatDur;
-
   usePatternA = !usePatternA;
 }
 
 // ---------------------------
-// 音再生（Sawtooth + LowPassFilter）
+// 音声合成 (レイヤリング)
 // ---------------------------
-function playTone(freq, time, dur, fParams) {
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  const filter = audioCtx.createBiquadFilter();
+function playLayeredTone(freq, time, dur, params) {
+  // --- Layer 1: Base (笛〜ストリングス) ---
+  const osc1 = audioCtx.createOscillator();
+  const gain1 = audioCtx.createGain();
+  const filter1 = audioCtx.createBiquadFilter();
 
-  // ★変更点: ノコギリ波（倍音が豊か＝削りがいがある）
-  osc.type = "sawtooth";
-  osc.frequency.value = freq;
+  osc1.type = "sawtooth"; // 倍音豊かな波形をベースにする
+  osc1.frequency.value = freq;
 
-  // ★変更点: フィルタ設定
-  filter.type = "lowpass";
-  filter.frequency.value = fParams.freq;
-  filter.Q.value = fParams.q;
+  filter1.type = "lowpass";
+  filter1.frequency.value = params.filterFreq;
+  filter1.Q.value = 1;
 
-  // 接続: Osc -> Filter -> Gain -> Out
-  osc.connect(filter);
-  filter.connect(gain);
-  gain.connect(audioCtx.destination);
+  osc1.connect(filter1).connect(gain1).connect(audioCtx.destination);
 
-  // エンベロープ（音量）
-  // 少しアタックを遅くすると管楽器っぽくなる
-  gain.gain.setValueAtTime(0, time);
-  gain.gain.linearRampToValueAtTime(0.4, time + 0.05); 
-  gain.gain.exponentialRampToValueAtTime(0.001, time + dur * 0.95);
+  // Envelope for Base
+  const atk = params.attackTime;
+  const rel = dur * 0.5;
+  
+  gain1.gain.setValueAtTime(0, time);
+  gain1.gain.linearRampToValueAtTime(0.4, time + atk);
+  gain1.gain.exponentialRampToValueAtTime(0.001, time + dur - 0.05);
 
-  // フィルタにもエンベロープを少しかけると「ワウ」感が出てより楽器らしくなる
-  // ここでは控えめに、音の出だしで少し開く動きを入れる
-  filter.frequency.setValueAtTime(fParams.freq * 0.8, time);
-  filter.frequency.linearRampToValueAtTime(fParams.freq, time + 0.05);
+  osc1.start(time);
+  osc1.stop(time + dur);
 
-  osc.start(time);
-  osc.stop(time + dur);
+
+  // --- Layer 2: Xylophone (粒音) ---
+  // xyloGain が 0 より大きい時だけ鳴らす
+  if (params.xyloGain > 0.01) {
+    const osc2 = audioCtx.createOscillator();
+    const gain2 = audioCtx.createGain();
+
+    osc2.type = "sine"; // 丸い音
+    // 1オクターブ上を混ぜるとより煌びやかになるが、
+    // ここでは同音程で「芯」を作る
+    osc2.frequency.value = freq; 
+
+    osc2.connect(gain2).connect(audioCtx.destination);
+
+    // Envelope for Xylo (短く叩く音)
+    gain2.gain.setValueAtTime(0, time);
+    gain2.gain.linearRampToValueAtTime(params.xyloGain, time + 0.01); // 即座に立ち上がり
+    gain2.gain.exponentialRampToValueAtTime(0.001, time + 0.15); // すぐ消える
+
+    osc2.start(time);
+    osc2.stop(time + 0.2); // 音自体は短くて良い
+  }
 }
 
 // ---------------------------
-// ループ監視
+// ループ
 // ---------------------------
 setInterval(() => {
   if (!isPlaying) return;
   const now = audioCtx.currentTime;
-  // 先読み
   if (nextBarTime - now < 0.1) {
     scheduleBar();
   }
